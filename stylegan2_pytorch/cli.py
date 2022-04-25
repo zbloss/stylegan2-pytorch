@@ -49,7 +49,7 @@ def run_training(rank, world_size, model_args, data, load_from, new, num_train_s
 
     model = Trainer(**model_args)
 
-    if model_args.wandb:
+    if model_args["wandb"]:
         wandb_logger.init()
         wandb_logger.watch(model, log_freq=log_freq)
 
