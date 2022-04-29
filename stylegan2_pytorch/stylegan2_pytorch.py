@@ -693,6 +693,7 @@ class StyleGAN2(nn.Module):
         self.lr = lr
         self.steps = steps
         self.ema_updater = EMA(0.995)
+        wandb_logger.config.update({"lr": 0.0002, "network_capacity": network_capacity, "fq_layers": fq_layers, "no_const": no_const, "fp16": fp16, "cl_reg": cl_reg, "attn_layers": attn_layers})
 
         self.S = StyleVectorizer(latent_dim, style_depth, lr_mul = lr_mlp)
         self.G = Generator(image_size, latent_dim, network_capacity, transparent = transparent, attn_layers = attn_layers, no_const = no_const, fmap_max = fmap_max)
@@ -804,9 +805,27 @@ class Trainer():
         world_size: int = 1,
         log: bool = False,
         wandb: bool = False,
+        entity: str = 'default',
         *args,
         **kwargs
     ):
+        wandb_logger.init(project=name, entity="stabs", config=args)
+        wandb_logger.config.update({
+            "batch_size":batch_size, 
+            "trunc_psi": trunc_psi,
+            "fp16": fp16, 
+            "cl_reg": cl_reg,
+            "no_pl_reg": no_pl_reg, 
+            "fq_layers": fq_layers, 
+            "fq_dict_size": fq_dict_size, 
+            "attn_layers": attn_layers, 
+            "no_const": no_const, 
+            "aug_prob": aug_prob, 
+            "aug_types": aug_types,
+            "top_k_training": top_k_training,
+            "dual_contrast_loss": dual_contrast_loss, 
+            "dataset_aug_prob": dataset_aug_prob, 
+            "is_ddp": is_ddp})
         self.GAN_params = [args, kwargs]
         self.GAN = None
 
@@ -1045,6 +1064,7 @@ class Trainer():
             if self.rel_disc_loss:
                 real_output_loss = real_output_loss - fake_output.mean()
                 fake_output_loss = fake_output_loss - real_output.mean()
+                wandb_logger.log({"real_output_loss":real_output_loss, "fake_output_loss":fake_output_loss})
 
             divergence = D_loss_fn(real_output_loss, fake_output_loss)
             disc_loss = divergence
@@ -1066,6 +1086,7 @@ class Trainer():
             backwards(disc_loss, self.GAN.D_opt, loss_id = 1)
 
             total_disc_loss += divergence.detach().item() / self.gradient_accumulate_every
+            wandb_logger.log({"divergence":divergence, "disc_loss":disc_loss, "total_disc_loss": total_disc_loss})
 
         self.d_loss = float(total_disc_loss)
         self.track(self.d_loss, 'D')
@@ -1118,6 +1139,7 @@ class Trainer():
             backwards(gen_loss, self.GAN.G_opt, loss_id = 2)
 
             total_gen_loss += loss.detach().item() / self.gradient_accumulate_every
+            wandb_logger.log({"gen_loss":gen_loss, "total_gen_loss":total_gen_loss})
 
         self.g_loss = float(total_gen_loss)
         self.track(self.g_loss, 'G')
@@ -1351,6 +1373,7 @@ class Trainer():
 
         data = [d for d in data if exists(d[1])]
         log = ' | '.join(map(lambda n: f'{n[0]}: {n[1]:.2f}', data))
+        wandb_logger.log(dict(data))
         print(log)
 
     def track(self, value, name):
@@ -1412,6 +1435,24 @@ class Trainer():
             raise e
         if self.GAN.fp16 and 'amp' in load_data:
             amp.load_state_dict(load_data['amp'])
+
+    def wandb_load(self, num = -1):
+        self.load_config()
+
+        name = num
+        if num == -1:
+            file_paths = [p for p in Path(self.models_dir / self.name).glob('model_*.pt')]
+            saved_nums = sorted(map(lambda x: int(x.stem.split('_')[1]), file_paths))
+            if len(saved_nums) == 0:
+                return
+            name = saved_nums[-1]
+            print(f'continuing from previous epoch - {name}')
+
+        self.steps = name * self.save_every
+
+        load_data = torch.load(self.model_name(name))
+        print(type(load_data), load_data)
+        return load_data
 
     @staticmethod
     def log_images_to_wandb(image, caption):
